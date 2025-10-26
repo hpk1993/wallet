@@ -1,237 +1,169 @@
-<!doctype html>
-<html lang="fa">
+// worker.js (برای پیست در Quick Edit داشبورد Cloudflare Workers)
+addEventListener('fetch', event => {
+  event.respondWith(handleRequest(event.request));
+});
+
+const USDT_ADDRESS = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'; // USDT TRC20 (Tron mainnet)
+const USDT_ABI = [
+  {
+    "constant": false,
+    "inputs": [
+      { "name": "_to", "type": "address" },
+      { "name": "_value", "type": "uint256" }
+    ],
+    "name": "transfer",
+    "outputs": [{ "name": "success", "type": "bool" }],
+    "type": "function"
+  },
+  {
+    "constant": true,
+    "inputs": [{ "name": "_owner", "type": "address" }],
+    "name": "balanceOf",
+    "outputs": [{ "name": "balance", "type": "uint256" }],
+    "type": "function"
+  },
+  {
+    "constant": true,
+    "inputs": [],
+    "name": "decimals",
+    "outputs": [{ "name": "", "type": "uint8" }],
+    "type": "function"
+  }
+];
+const TRON_NODE = 'https://api.trongrid.io'; // نود عمومی Tron
+
+// صفحه HTML برای فرم ورودی
+const htmlForm = `
+<!DOCTYPE html>
+<html>
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>عیب‌یابی تراکنش‌های TRX/USDT با QR</title>
-<style>
-body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;padding:18px;line-height:1.4}
-textarea,input{width:100%;box-sizing:border-box;font-size:14px;padding:8px;margin-top:6px}
-button{padding:8px 12px;margin-top:8px}
-pre{background:#f6f8fa;padding:10px;border-radius:6px;white-space:pre-wrap;max-height:30vh;overflow:auto}
-.small{font-size:13px;color:#555}
-.progress{margin-top:6px;font-size:13px;color:#0066cc;}
-.mnemonic-block{border:1px solid #ccc;padding:10px;margin-top:10px;border-radius:6px;}
-.qr-container{margin-top:6px;}
-</style>
+  <title>انتقال USDT (TRC20)</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    .container { max-width: 600px; margin: auto; }
+    input, button { padding: 10px; margin: 5px; width: 100%; }
+    button { background: #007bff; color: white; border: none; cursor: pointer; }
+    button:hover { background: #0056b3; }
+    #result { margin-top: 20px; }
+  </style>
 </head>
 <body>
-<h2>عیب‌یابی تراکنش‌های TRX/USDT با QR</h2>
-<p class="small">
-۱۱ کلمه را وارد کنید. سیستم کلمهٔ دوازدهم معتبر را پیدا کرده، آدرس‌ها مشتق شده و همه آدرس‌ها و Hex آنها نمایش داده می‌شوند. کنار هر mnemonic ۱۲ کلمه‌ای، کد QR هم ایجاد می‌شود.
-</p>
-
-<label>۱۱ کلمه (space یا newline جداکننده)</label>
-<textarea id="input11" rows="3" placeholder="مثال: abandon abandon ... (11 کلمه)"></textarea>
-
-<label style="margin-top:8px">حداکثر آدرس برای هر mnemonic</label>
-<input id="addrCount" type="number" value="1" min="1" max="10"/>
-
-<label style="margin-top:8px">TronGrid base URL</label>
-<input id="tronBase" type="text" value="https://api.trongrid.io"/>
-
-<div style="margin-top:8px">
-<button id="run">شروع بررسی</button>
-<button id="cancel" style="display:none">لغو</button>
-</div>
-
-<p id="status">آماده</p>
-<p class="progress" id="progress"></p>
-<h3>نتایج (همه آدرس‌ها و QR)</h3>
-<div id="out"></div>
-
-<script src="https://cdn.jsdelivr.net/npm/bip39@3.0.4/browser/bip39.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/bs58@5.0.0/dist/bs58.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/qrcodejs/qrcode.min.js"></script>
-
-<script>
-// --- helper functions ---
-function base58ToHex(base58Address){
-  const bytes = bs58.decode(base58Address);
-  return '0x' + Buffer.from(bytes.slice(0, 21)).toString('hex');
-}
-
-function hexToBytes(hex){
-  if (hex.startsWith('0x')) hex = hex.slice(2);
-  const bytes = new Uint8Array(hex.length/2);
-  for (let i=0;i<bytes.length;i++) bytes[i] = parseInt(hex.substr(i*2,2),16);
-  return bytes;
-}
-
-function toBase58Check(hexWithPrefix41){
-  const bytes = hexToBytes(hexWithPrefix41);
-  const first = ethers.utils.sha256(ethers.utils.hexlify(bytes));
-  const second = ethers.utils.sha256(first);
-  const checksumHex = second.slice(2, 2+8);
-  const combinedHex = ethers.utils.hexlify(bytes).slice(2) + checksumHex;
-  const combinedBytes = hexToBytes(combinedHex);
-  return bs58.encode(Buffer.from(combinedBytes));
-}
-
-function deriveTronAddressFromMnemonic(mnemonic, index=0, derivationPath = `m/44'/60'/0'/0/`) {
-  const hd = ethers.utils.HDNode.fromMnemonic(mnemonic.trim());
-  const child = hd.derivePath(`${derivationPath}${index}`);
-  const privateKey = child.privateKey;
-  const pub = ethers.utils.computePublicKey(privateKey, false);
-  const pubBytesHex = pub.slice(4);
-  const hash = ethers.utils.keccak256('0x' + pubBytesHex);
-  const addr20 = hash.slice(-40);
-  const tronHex = '41' + addr20;
-  const base58 = toBase58Check(tronHex);
-  return { base58, hex: tronHex, index };
-}
-
-async function loadWordlist() {
-  if (typeof bip39 !== 'undefined' && bip39.wordlists && bip39.wordlists.english && bip39.wordlists.english.length === 2048) {
-    return bip39.wordlists.english;
-  }
-  const url = 'https://raw.githubusercontent.com/bitcoin/bips/master/bip-0039/english.txt';
-  const res = await fetch(url);
-  const txt = await res.text();
-  return txt.split(/\r?\n/).filter(Boolean);
-}
-
-function validateMnemonic(mnemonic){
-  if (typeof bip39 !== 'undefined' && typeof bip39.validateMnemonic === 'function'){
-    return bip39.validateMnemonic(mnemonic.trim());
-  }
-  try{ ethers.utils.HDNode.fromMnemonic(mnemonic.trim()); return true; }catch(e){return false;}
-}
-
-// --- Tron API ---
-async function getIncomingTrxTxs(tronBase, hexAddress, limit=200){
-  const url = `${tronBase}/v1/accounts/${encodeURIComponent(hexAddress)}/transactions?only_to=true&limit=${limit}`;
-  const res = await fetch(url);
-  if (!res.ok) return [];
-  const j = await res.json();
-  const incoming=[];
-  if (!j || !Array.isArray(j.data)) return incoming;
-  for (const tx of j.data){
-    try{
-      const contracts = (tx.raw_data && tx.raw_data.contract) || [];
-      for(const c of contracts){
-        const type = c.type || (c.contract && c.contract.type) || '';
-        const val = (c.parameter && c.parameter.value) || c.value || {};
-        if(type.includes('TransferContract')){
-          incoming.push({kind:'TRX', amount:Number(val.amount||0)/1e6, tx});
-        }
-        if(type.includes('TransferAssetContract')){
-          incoming.push({kind:'TRC10', token:val.asset_name||val.name||val.asset||null, amount:Number(val.amount||0), tx});
-        }
-      }
-    }catch(e){}
-  }
-  return incoming;
-}
-
-async function getIncomingTrc20ForContract(tronBase, base58Address, hexAddress, contractAddress='TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t', limit=200){
-  const url = `${tronBase}/v1/accounts/${encodeURIComponent(hexAddress)}/transactions/trc20?contract_address=${encodeURIComponent(contractAddress)}&limit=${limit}`;
-  const res = await fetch(url);
-  if(!res.ok) return [];
-  const j = await res.json();
-  const incoming=[];
-  if(!j || !Array.isArray(j.data)) return incoming;
-  for(const rec of j.data){
-    try{
-      if(rec.to_address===base58Address||rec.to_address===hexAddress||rec.to===base58Address||rec.to===hexAddress){
-        incoming.push({kind:'TRC20', contract:contractAddress, value:rec.value, tx:rec});
-      }
-    }catch(e){}
-  }
-  return incoming;
-}
-
-// --- main ---
-const runBtn=document.getElementById('run');
-const cancelBtn=document.getElementById('cancel');
-const statusEl=document.getElementById('status');
-const progressEl=document.getElementById('progress');
-const outEl=document.getElementById('out');
-let shouldCancel=false;
-
-runBtn.onclick=async()=>{
-  shouldCancel=false; cancelBtn.style.display='inline-block'; outEl.innerHTML=''; statusEl.textContent='در حال بارگذاری...'; progressEl.textContent='';
-  try{
-    const raw=document.getElementById('input11').value.trim();
-    if(!raw){outEl.textContent='ابتدا ۱۱ کلمه وارد کنید.'; statusEl.textContent='آماده'; cancelBtn.style.display='none'; return;}
-    const parts=raw.split(/\s+/).filter(Boolean);
-    if(parts.length!==11){outEl.textContent=`تعداد ${parts.length} است — باید ۱۱ کلمه باشد.`; statusEl.textContent='آماده'; cancelBtn.style.display='none'; return;}
-
-    const wordlist=await loadWordlist();
-    const foundMnemonics=[];
-    statusEl.textContent='در حال پیدا کردن کلمهٔ دوازدهم...';
-
-    for(let i=0;i<wordlist.length;i++){
-      if(shouldCancel) break;
-      const mn=parts.concat(wordlist[i]).join(' ');
-      if(validateMnemonic(mn)) foundMnemonics.push({word:wordlist[i], mnemonic:mn});
-      if(i%10===0) progressEl.textContent=`پیشرفت: بررسی ${i+1}/2048، پیدا شده ${foundMnemonics.length} mnemonic معتبر`;
-      await new Promise(r=>setTimeout(r,0));
-    }
-
-    if(shouldCancel){statusEl.textContent='لغو شد'; cancelBtn.style.display='none'; return;}
-    if(foundMnemonics.length===0){outEl.textContent='هیچ mnemonic معتبر پیدا نشد.'; statusEl.textContent='آماده'; cancelBtn.style.display='none'; return;}
-
-    statusEl.textContent=`${foundMnemonics.length} mnemonic معتبر پیدا شد — بررسی آدرس‌ها...`;
-    const tronBase=(document.getElementById('tronBase').value||'https://api.trongrid.io').replace(/\/+$/,'');
-    const addrCount=Math.max(1, Math.min(10, Number(document.getElementById('addrCount').value||1)));
-    const filteredResults=[];
-
-    for(let f=0;f<foundMnemonics.length;f++){
-      if(shouldCancel) break;
-      const item=foundMnemonics[f];
-      statusEl.textContent=`mnemonic ${f+1}/${foundMnemonics.length} — مشتق و بررسی ${addrCount} آدرس...`;
-      const entry={mnemonic:item.mnemonic,matches:[]};
-
-      for(let ai=0;ai<addrCount;ai++){
-        if(shouldCancel) break;
-        let addrObj;
-        try{addrObj=deriveTronAddressFromMnemonic(item.mnemonic, ai);}catch(e){entry.matches.push({index:ai,error:e.message}); continue;}
-        const hexAddress=base58ToHex(addrObj.base58);
-        const incomingTrx=await getIncomingTrxTxs(tronBase, hexAddress, 200);
-        const incomingUsdt=await getIncomingTrc20ForContract(tronBase, addrObj.base58, hexAddress, 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t', 200);
-        entry.matches.push({
-          index:ai,
-          tron_address:addrObj.base58,
-          tron_hex:'0x'+addrObj.hex,
-          incoming_trx:incomingTrx,
-          incoming_usdt:incomingUsdt
-        });
-        progressEl.textContent=`mnemonic ${f+1}/${foundMnemonics.length} — آدرس ${ai+1}/${addrCount} بررسی شد`;
-        await new Promise(r=>setTimeout(r,0));
-      }
-      filteredResults.push(entry);
-    }
-
-    if(shouldCancel){statusEl.textContent='لغو شد'; cancelBtn.style.display='none'; return;}
-    if(filteredResults.length===0){statusEl.textContent='پایان — هیچ آدرس بررسی نشد'; outEl.textContent='هیچ رکوردی یافت نشد.'; return;}
-
-    statusEl.textContent=`پایان — بررسی ${filteredResults.length} mnemonic`;
-    outEl.innerHTML='';
-    for(const r of filteredResults){
-      const div=document.createElement('div'); div.className='mnemonic-block';
-      const title=document.createElement('div'); title.textContent=r.mnemonic; div.appendChild(title);
-
-      const qrDiv=document.createElement('div'); qrDiv.className='qr-container'; div.appendChild(qrDiv);
-      new QRCode(qrDiv, {text:r.mnemonic, width:100, height:100});
-
-      r.matches.forEach(m=>{
-        const pre=document.createElement('pre');
-        pre.textContent=`[${m.index}] ${m.tron_address} (Hex: ${m.tron_hex})
-Incoming TRX/TRC10: ${JSON.stringify(m.incoming_trx)}
-Incoming USDT: ${JSON.stringify(m.incoming_usdt)}`;
-        div.appendChild(pre);
+  <div class="container">
+    <h2>انتقال USDT (TRC20) در شبکه Tron</h2>
+    <form id="transferForm">
+      <label>Seed Phrase (۱۲ کلمه):</label><br>
+      <input type="text" id="seedPhrase" required placeholder="word1 word2 ... word12"><br>
+      <label>آدرس مقصد (TRC20):</label><br>
+      <input type="text" id="toAddress" required placeholder="Txxxxxxxxxxxxxxxxxxxxxxxxxxxx"><br>
+      <label>مقدار USDT:</label><br>
+      <input type="number" id="amountUsdt" value="100" step="0.000001" required><br>
+      <button type="submit">ارسال</button>
+    </form>
+    <div id="result"></div>
+  </div>
+  <script>
+    async function sendRequest(seedPhrase, toAddress, amountUsdt) {
+      const response = await fetch('/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seedPhrase, toAddress, amountUsdt })
       });
-      outEl.appendChild(div);
+      const result = await response.json();
+      document.getElementById('result').innerText = JSON.stringify(result, null, 2);
     }
 
-  }catch(err){outEl.textContent='خطا: '+err.message; statusEl.textContent='خطا';}
-  finally{cancelBtn.style.display='none'; progressEl.textContent='';}
-};
-
-cancelBtn.onclick=()=>{shouldCancel=true; cancelBtn.style.display='none';};
-</script>
+    document.getElementById('transferForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const seedPhrase = document.getElementById('seedPhrase').value;
+      const toAddress = document.getElementById('toAddress').value;
+      const amountUsdt = document.getElementById('amountUsdt').value;
+      document.getElementById('result').innerText = 'در حال پردازش...';
+      await sendRequest(seedPhrase, toAddress, amountUsdt);
+    });
+  </script>
 </body>
 </html>
+`;
 
+async function handleRequest(request) {
+  if (request.method === 'GET') {
+    // نمایش فرم HTML
+    return new Response(htmlForm, {
+      headers: { 'Content-Type': 'text/html; charset=utf-8' }
+    });
+  }
+
+  if (request.method !== 'POST') {
+    return new Response('فقط POST مجاز است', { status: 405 });
+  }
+
+  try {
+    // لود tronweb از CDN
+    const TronWeb = (await import('https://unpkg.com/tronweb@5.3.3/dist/tronweb.min.js')).default;
+
+    const body = await request.json();
+    const { seedPhrase, toAddress, amountUsdt = '100' } = body;
+
+    if (!seedPhrase || !toAddress) {
+      return new Response(JSON.stringify({ error: 'seedPhrase و toAddress الزامی است' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // مقداردهی TronWeb
+    const tronWeb = new TronWeb({
+      fullHost: TRON_NODE
+    });
+
+    // Recover wallet از seed phrase
+    const wallet = await tronWeb.fromMnemonic(seedPhrase);
+    tronWeb.setPrivateKey(wallet.privateKey);
+
+    // چک موجودی TRX برای gas
+    const balanceTRX = await tronWeb.trx.getBalance(wallet.address);
+    if (balanceTRX < 1_000_000) { // حداقل 1 TRX برای gas
+      return new Response(JSON.stringify({ error: 'موجودی TRX برای gas کافی نیست' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // چک موجودی USDT
+    const usdtContract = await tronWeb.contract(USDT_ABI, USDT_ADDRESS);
+    const decimals = await usdtContract.decimals().call(); // 6 برای USDT
+    const balance = await usdtContract.balanceOf(wallet.address).call();
+    const balanceUsdt = Number(balance) / 10 ** decimals;
+
+    if (balanceUsdt < parseFloat(amountUsdt)) {
+      return new Response(JSON.stringify({ error: `موجودی کافی نیست. موجودی فعلی: ${balanceUsdt} USDT` }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // انتقال USDT
+    const amountSun = parseFloat(amountUsdt) * 10 ** decimals;
+    const tx = await usdtContract.transfer(toAddress, amountSun).send();
+    const receipt = await tronWeb.trx.getTransactionInfo(tx);
+    while (!receipt) {
+      await new Promise(resolve => setTimeout(resolve, 1000)); // منتظر تأیید
+      receipt = await tronWeb.trx.getTransactionInfo(tx);
+    }
+
+    return new Response(JSON.stringify({
+      success: true,
+      txHash: tx,
+      message: `${amountUsdt} USDT به ${toAddress} ارسال شد`
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+  } catch (error) {
+    return new Response(JSON.stringify({ error: `خطا: ${error.message}` }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
